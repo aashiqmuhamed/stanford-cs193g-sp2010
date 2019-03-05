@@ -45,6 +45,14 @@ void host_shift_cypher(unsigned int *input_array, unsigned int *output_array, un
 __global__ void shift_cypher(unsigned int *input_array, unsigned int *output_array, unsigned int shift_amount, unsigned int alphabet_max, unsigned int array_length)
 {
   // TODO your code here
+    unsigned int i = threadIdx.x + blockDim.x * blockIdx.x;
+    int element = input_array[i];
+    int shifted = element+shift_amount;
+    if (shifted > alphabet_max) {
+        shifted = shifted % (alphabet_max + 1);
+    }
+    output_array[i] = shifted;
+
 }
 
 

@@ -43,6 +43,18 @@ void host_graph_propagate(unsigned int *graph_indices, unsigned int *graph_edges
   }
 }
 
+__global__ void device_graph_propagate(unsigned int *graph_indices, unsigned int *graph_edges, float *graph_nodes_in, float *graph_nodes_out, float * inv_edges_per_node, int *d_array_length)
+{
+  int array_length = *d_array_length;
+  unsigned int i = threadIdx.x + blockDim.x*blockIdx.x;
+  float sum = 0.f; 
+  for(int j = graph_indices[i]; j < graph_indices[i+1]; j++)
+    {
+      sum += graph_nodes_in[graph_edges[j]]*inv_edges_per_node[graph_edges[j]];
+    }
+    graph_nodes_out[i] = 0.5f/(float)array_length + 0.5f*sum;
+ 
+}
 
 void host_graph_iterate(unsigned int *graph_indices, unsigned int *graph_edges, float *graph_nodes_A, float *graph_nodes_B, float * inv_edges_per_node, int nr_iterations, int array_length)
 {
@@ -69,15 +81,55 @@ void device_graph_iterate(unsigned int *h_graph_indices,
                           int avg_edges)
 {
   // TODO all of your gpu memory allocation and copying to gpu memory has to be in this function
+ 
+    unsigned int *d_graph_indices = 0;
+    unsigned int *d_graph_edges =0;
+    float *d_graph_nodes_input = 0;
+    float *d_graph_nodes_result = 0;
+    float *d_inv_edges_per_node = 0;
+    int* d_num_elements = 0;
+ 
+  cudaMalloc((void**)&d_graph_indices,(num_elements+1) * sizeof(unsigned int));
+  cudaMalloc((void**)&d_inv_edges_per_node,(num_elements) * sizeof(float));
+  cudaMalloc((void**)&d_graph_edges,num_elements * avg_edges * sizeof(unsigned int));
+  cudaMalloc((void**)&d_graph_nodes_input,num_elements * sizeof(float));
+  cudaMalloc((void**)&d_graph_nodes_result,num_elements * sizeof(float));
+  cudaMalloc((void**)&d_num_elements,sizeof(int));
+
+     
+  cudaMemcpy(d_graph_indices,h_graph_indices,(num_elements+1) * sizeof(unsigned int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_inv_edges_per_node,h_inv_edges_per_node,(num_elements) * sizeof(float),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_graph_edges,h_graph_edges,num_elements * avg_edges * sizeof(unsigned int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_graph_nodes_input,h_graph_nodes_input,num_elements * sizeof(float),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_graph_nodes_result,h_graph_nodes_result,num_elements * sizeof(float),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_num_elements,&num_elements,sizeof(int),cudaMemcpyHostToDevice);
 
   start_timer(&timer);
 
   // TODO your device code should go here, so you can measure how long it takes
-  
+  const size_t block_size = 256;
+  size_t grid_size = num_elements/block_size;
+    
+  for(int iter = 0; iter < nr_iterations; iter+=2)
+  {
+   device_graph_propagate<<<grid_size,block_size>>> (d_graph_indices, d_graph_edges, d_graph_nodes_input, d_graph_nodes_result, d_inv_edges_per_node, d_num_elements);
+    device_graph_propagate<<<grid_size,block_size>>>(d_graph_indices, d_graph_edges, d_graph_nodes_result, d_graph_nodes_input, d_inv_edges_per_node, d_num_elements);
+  }
+
   check_launch("gpu graph propagate");
   stop_timer(&timer,"gpu graph propagate");
 
   // TODO your final result should end up in h_graph_nodes_result, which is a *host* pointer
+
+   cudaMemcpy(h_graph_nodes_result,d_graph_nodes_result,num_elements*sizeof(float),cudaMemcpyDeviceToHost);
+
+    cudaFree(d_graph_indices);
+    cudaFree(d_graph_edges);
+    cudaFree(d_graph_nodes_input);
+    cudaFree(d_graph_nodes_result);
+    cudaFree(d_inv_edges_per_node);
+    cudaFree(d_num_elements);
+
 }
 
 

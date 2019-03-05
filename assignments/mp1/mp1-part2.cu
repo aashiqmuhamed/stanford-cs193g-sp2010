@@ -13,7 +13,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-
+#include "util/cuPrintf.cu"
 #include "mp1-util.h"
 #define EPSILON 0.00001f
 
@@ -23,7 +23,7 @@ const int maxUlps = 1000;
 
 event_pair timer;
   
-float4 force_calc(float4 A, float4 B) 
+__host__ __device__ float4 force_calc(float4 A, float4 B) 
 {
   float x = B.x - A.x;
   float y = B.y - A.y;
@@ -43,6 +43,7 @@ float4 force_calc(float4 A, float4 B)
  
 void host_force_eval(float4 *set_A, float4 *set_B, int * indices, float4 *force_vectors, int array_length)
 {
+   //printf("%d\n",array_length);
   for(int i=0;i<array_length;i++)
   {
     if(indices[i] < array_length && indices[i] >= 0)
@@ -57,33 +58,86 @@ void host_force_eval(float4 *set_A, float4 *set_B, int * indices, float4 *force_
 }
 
 
-__global__ void force_eval(float4 *set_A, float4 *set_B, int * indices, float4 *force_vectors, int array_length)
+__global__ void force_eval(float4 *set_A, float4 *set_B, int * indices, float4 *force_vectors, int *num_elements)
 {
   // TODO your code here ...
+    int array_length = *num_elements;
+    unsigned int i = threadIdx.x+ blockDim.x*blockIdx.x;
+    printf("%d \n",i); 
+     
+    if(indices[i] < array_length && indices[i] >=0) {
+        force_vectors[i] = force_calc(set_A[i],set_B[indices[i]]);
+    }
+    else {
+        force_vectors[i] = make_float4(0.0,0.0,0.0,0.0);
+    }
+//    force_vectors[i] = make_float4(1.0,1.0,1.0,1.0);
 }
 
 
 
 void host_charged_particles(float4 *h_set_A, float4 *h_set_B, int *h_indices, float4 *h_force_vectors, int num_elements)
 { 
-  // TODO your code here ...
+  // TODO your code here ..
+    float4 *d_set_A =0;
+    float4 *d_set_B= 0;
+    int *d_indices = 0;
+    float4 *d_force_vectors = 0;
+    int *d_num_elements =0;
+
+    int *num_temp = 0;
+    num_temp = (int *)malloc(sizeof(int));
+    *num_temp = num_elements;
+
+
+  cudaMalloc((void**)&d_set_A,num_elements * sizeof(float4));
+  cudaMalloc((void**)&d_set_B,num_elements * sizeof(float4));
+  cudaMalloc((void**)&d_indices,num_elements * sizeof(int));
+  cudaMalloc((void**)&d_force_vectors,num_elements * sizeof(float4));
+  cudaMalloc((void**)&d_num_elements,sizeof(int));
+
+  printf("Device memory allocated");
+  cudaMemcpy(d_set_A,h_set_A,num_elements*sizeof(float4),cudaMemcpyHostToDevice);    
+  cudaMemcpy(d_set_B,h_set_B,num_elements*sizeof(float4),cudaMemcpyHostToDevice);    
+  cudaMemcpy(d_indices,h_indices,num_elements*sizeof(int),cudaMemcpyHostToDevice);    
+  cudaMemcpy(d_force_vectors,h_force_vectors,num_elements*sizeof(float4),cudaMemcpyHostToDevice);    
+  cudaMemcpy(d_num_elements,num_temp,sizeof(int),cudaMemcpyHostToDevice);    
   
+  printf("Copied from host to device");
   start_timer(&timer);
   // launch kernel
-  
+ const size_t block_size =1;
+ size_t grid_size = num_elements/block_size;
+
+ force_eval<<<grid_size,block_size>>>(d_set_A,d_set_B,d_indices,d_force_vectors,d_num_elements);
   // the actual kernel launch should go here, so that the time it took is measured 
 
   check_launch("gpu force eval");
   stop_timer(&timer,"gpu force eval");
   
-  // TODO more code here...
+  // TODO more code here..
+  cudaMemcpy(h_force_vectors,d_force_vectors,num_elements*sizeof(float4),cudaMemcpyDeviceToHost);
+  int *temp = 0;
+  temp = (int *)malloc(sizeof(int));
+
+  cudaMemcpy(temp,d_num_elements,sizeof(int),cudaMemcpyDeviceToHost);
+ // printf("%d \n",*temp);
+ cudaFree(d_set_A);
+ cudaFree(d_set_B);
+ cudaFree(d_indices);
+ cudaFree(d_force_vectors);
+ cudaFree(d_num_elements);
+ 
+  free(temp);
+free(num_temp); 
+
 }
 
 
 int main(void)
 {
   // create arrays of 4M elements
-  int num_elements =  1 << 22;
+  int num_elements =  1 << 4;
 
   // pointers to host & device arrays
   float4 *h_set_A = 0;
@@ -136,7 +190,7 @@ int main(void)
   {
     float4 v = h_force_vectors[i];
     float4 vc = h_force_vectors_checker[i];
-
+    printf("%g \t %g \n",v.x,vc.x);
     if( !AlmostEqual2sComplement(v.x,vc.x,maxUlps) ||
     	!AlmostEqual2sComplement(v.y,vc.y,maxUlps) ||
     	!AlmostEqual2sComplement(v.z,vc.z,maxUlps) ||
