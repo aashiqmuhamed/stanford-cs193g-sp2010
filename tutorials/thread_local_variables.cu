@@ -4,7 +4,7 @@
 // variable while maintaining a priority queue, or heap, of the ten
 // nearest points to p in a per-thread local array variable.
 
-#include <util/stl_heap.h>
+#include "util/stl_heap.h"
 #include <stdlib.h>
 #include <vector>
 #include <iostream>
