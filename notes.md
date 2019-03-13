@@ -22,3 +22,11 @@ Primordial pattern - locking in CUDA processors
 # Reduce
 Contigious vs interleaved access patterns and their dependence on performance
 Complexity : Step O(logN), Operation O(N), Time O(N/P + logN)
+
+# Split, compact, expand
+Separate key value pairs by key (Sorting, building trees)
+Removing null elements
+
+Reserve variable storage per thread (Binning = store in compact fashion)
+Scan - inclusive vs exclusive (shifted inclusive, reduce+scan, last element)
+2-Phase scan
