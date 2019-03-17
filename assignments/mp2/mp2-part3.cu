@@ -61,6 +61,31 @@ unsigned int bin_index(float3 particle, int3 gridding)
   return index;
 }
 
+//Parallelize at the particle level
+__global__ void device_binning(float3 *d_particles,int *d_bins,int * d_bin_counters, int *d_overflow_flag,int3 gridding, int bin_size, int num_particles) 
+{
+
+    int i = blockIdx.x * blockDim.x  + threadIdx.x;
+
+    //printf("%d",i); 
+    if (i <num_particles) 
+{
+    unsigned int bin = bin_index(d_particles[i],gridding);
+    if(d_bin_counters[bin] < bin_size)
+    {
+    //  printf("%d %d \n",d_bin_counters[bin],bin_size);
+    //  unsigned int offset = atomicExch(d_bin_counters[bin]);
+      // let's not do the whole precrement / postcrement thing...
+      unsigned int offset = atomicAdd(&d_bin_counters[bin],1);
+      atomicExch(&d_bins[bin*bin_size + offset],i);
+    }
+    else {
+      atomicExch(d_overflow_flag,true);
+      printf("%d",bin_size);
+      printf("%d",d_bin_counters[bin]);
+    }
+    }
+}
 __host__ __device__ 
 float dist2(float3 a, float3 b)
 {
@@ -132,6 +157,19 @@ void allocate_device_memory(int num_particles, int num_bins, int bin_size, int n
 {
   // TODO: your device memory allocations here
   // TODO: don't forget to check for errors
+  
+  cudaMalloc((void**)&d_particles,num_particles * sizeof(float3));
+  cudaMalloc((void**)&d_bins,num_bins * bin_size * sizeof(int));
+  cudaMalloc((void**)&d_knn,num_particles * num_neighbors * sizeof(int));
+  cudaMalloc((void**)&d_bin_counters,num_bins * sizeof(int));
+  cudaMalloc((void**)&d_overflow_flag,sizeof(int));
+  
+  if(d_particles==0 || d_bins==0 || d_knn == 0 || d_bin_counters ==0 || d_overflow_flag==0) {
+      printf("could't allocated device memory\n");
+      exit(1);
+  }
+
+
 }
 
 
@@ -157,6 +195,12 @@ void deallocate_device_memory(float3 *d_particles, int *d_bins,
 {
   // TODO: your device memory deallocations here
   // TODO: don't forget to check for errors
+
+  cudaFree(d_particles);
+  cudaFree(d_bins);
+  cudaFree(d_knn);
+  cudaFree(d_bin_counters);
+  cudaFree(d_overflow_flag);
 }
 
 
@@ -244,6 +288,65 @@ void host_binned_knn(float3 *particles, int *bins, int *knn, int3 binning_dim, i
   }
 }
 
+template
+<int num_neighbors,int blockdim>
+__global__ void device_binned_knn(float3 *particles,int *bins,int *knn,int3 binning_dim,int bin_size,int3 gridding)
+{
+    unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+    float3 p = particles[i]; 
+
+    unsigned int bin_id = bin_index(particles[i],gridding);
+    int bx = bin_id % binning_dim.x;
+    int by = ((bin_id - bx)/binning_dim.x) % binning_dim.y;
+    int bz  = ((((bin_id - bx)/binning_dim.x) - by)/binning_dim.y);
+
+
+  __shared__ float neigh_dist[blockdim*num_neighbors];
+  __shared__ int neigh_ids[blockdim*num_neighbors];
+    
+  init_list(&neigh_dist[0]+threadIdx.x*num_neighbors,num_neighbors,2.0f);
+  init_list(&neigh_ids[0]+threadIdx.x*num_neighbors,num_neighbors,-1);
+  
+
+  for(int x_offset=-1;x_offset<2;x_offset++)
+  {
+    int nx = bx + x_offset;
+    if(nx > -1 && nx < binning_dim.x)
+    {
+      for(int y_offset=-1;y_offset<2;y_offset++)
+      {
+        int ny = by + y_offset;
+        if(ny > -1 && ny < binning_dim.y)
+        {
+          for(int z_offset=-1;z_offset<2;z_offset++)
+          {
+            int nz = bz + z_offset;
+            if(nz > -1 && nz < binning_dim.z)
+            {
+              int neigh_bin_id = nx + binning_dim.x*(ny + binning_dim.y*nz);
+              
+              // loop over all the particles in those bins
+              for(int bin_offset=0;bin_offset<bin_size;bin_offset++)
+              {
+                int neigh_particle_id = bins[neigh_bin_id*bin_size + bin_offset];
+                // skip empty bin entries and don't interact with yourself
+                if(neigh_particle_id != -1 && neigh_particle_id != i)
+                {
+                  float rsq = dist2(p,particles[neigh_particle_id]);
+                  insert_list(&neigh_dist[0]+threadIdx.x*num_neighbors, &neigh_ids[0]+threadIdx.x*num_neighbors, num_neighbors, rsq, neigh_particle_id);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  for(int j=0;j<num_neighbors;j++)
+  { 
+    knn[i*num_neighbors+j] = neigh_ids[j+threadIdx.x*num_neighbors];
+  }
+}
 int main(void)
 {  
   // create arrays of 512K elements
@@ -308,14 +411,27 @@ int main(void)
   // copy input to GPU
   start_timer(&timer);
   // TODO: your copy of input from host to device here
+  
+  cudaMemcpy(d_particles,h_particles,num_particles * sizeof(float3),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_bins,h_bins,num_bins * bin_size * sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_knn,h_knn,num_particles * num_neighbors * sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_bin_counters,h_bin_counters,num_bins * sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemset(d_overflow_flag,0,sizeof(int));
+
+  const int blockdim = 512;
+  const int griddim = (num_particles)/blockdim;
   stop_timer(&timer,"copy to gpu");
   
   start_timer(&timer);
   // TODO: your particle binning kernel launch here
+
+  device_binning<<<griddim,blockdim>>>(d_particles, d_bins, d_bin_counters, d_overflow_flag, gridding, bin_size, num_particles);
+
   check_cuda_error("binning");
   stop_timer(&timer,"binning");
   
   // TODO: your check for overflow here
+  cudaMemcpy(&h_overflow_flag,d_overflow_flag,sizeof(int),cudaMemcpyDeviceToHost);
   check_cuda_error("flag copy");
   if(h_overflow_flag)
   {
@@ -325,12 +441,17 @@ int main(void)
     
   start_timer(&timer);  
   // TODO: your binned k-nearest neighbor kernel launch here
+
+  device_binned_knn<num_neighbors,blockdim><<<griddim,blockdim>>>(d_particles, d_bins, d_knn, binning_dim, bin_size,gridding);
   check_cuda_error("binned knn");
   stop_timer(&timer,"binned knn");
   
   // download and inspect the result on the host
   start_timer(&timer);
   // TODO: your copy of results from device to host here
+  cudaMemcpy(h_bins,d_bins,num_bins * bin_size * sizeof(int),cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_knn,d_knn,num_particles * num_neighbors * sizeof(int),cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_bin_counters,d_bin_counters,num_bins * sizeof(int),cudaMemcpyDeviceToHost);
   check_cuda_error("copy from gpu");
   stop_timer(&timer,"copy back from gpu");
 

@@ -31,7 +31,6 @@
 // TODO enable this to print debugging information
 //const bool print_debug = true;
 const bool print_debug = false;
-
 event_pair timer;
 
 inline __device__ __host__ float3 operator -(float3 a, float3 b)
@@ -103,7 +102,57 @@ void host_find_knn(float3 *particles, int *knn, int array_length)
   }
 }
 
+__global__ void device_find_knn_local(float3 *particles, int *knn, int array_length) 
+{
+    const int NUM_NEIGHBORS=5; 
+    unsigned int i = blockDim.x*blockIdx.x + threadIdx.x; 
+    float3 p = particles[i];
+    float neigh_dist[NUM_NEIGHBORS];
+    int neigh_ids[NUM_NEIGHBORS];
+    
+    init_list(&neigh_dist[0],NUM_NEIGHBORS,2.0f);
+    init_list(&neigh_ids[0],NUM_NEIGHBORS,-1);
+    for(int j=0;j<array_length;j++)
+    {
+      if(i != j)
+      {
+        float rsq = dist2(p,particles[j]);
+        insert_list(&neigh_dist[0], &neigh_ids[0], NUM_NEIGHBORS, rsq, j);
+      }
+    }
+    for(int j=0;j<NUM_NEIGHBORS;j++)
+    {
+      knn[NUM_NEIGHBORS*i + j] = neigh_ids[j];
+    }
+}
 
+__global__ void device_find_knn_shared(float3* particles, int *knn, int array_length) 
+{ 
+    const int NUM_NEIGHBORS =5;
+    const int block_size = 512;
+
+    __shared__ float neigh_dist[block_size*NUM_NEIGHBORS];
+    __shared__ int neigh_ids[block_size*NUM_NEIGHBORS];
+    
+    init_list(&neigh_dist[0]+threadIdx.x*NUM_NEIGHBORS,NUM_NEIGHBORS,2.0f);
+    init_list(&neigh_ids[0]+threadIdx.x*NUM_NEIGHBORS,NUM_NEIGHBORS,-1);
+   // __syncthreads();
+    
+    unsigned int i = blockDim.x*blockIdx.x + threadIdx.x; 
+    float3 p = particles[i];
+    for(int j=0;j<array_length;j++)
+    {
+      if(i != j)
+      {
+        float rsq = dist2(p,particles[j]);
+        insert_list(&neigh_dist[0]+threadIdx.x*NUM_NEIGHBORS, &neigh_ids[0]+threadIdx.x*NUM_NEIGHBORS, NUM_NEIGHBORS, rsq, j);
+      }
+    }
+    for(int j=0;j<NUM_NEIGHBORS;j++)
+    {
+      knn[NUM_NEIGHBORS*i + j] = neigh_ids[j+threadIdx.x*NUM_NEIGHBORS];
+    }
+}
 void allocate_host_memory(int num_particles, int num_neighbors,
                           float3 *&h_particles, int *&h_knn, int *&h_knn_checker)
 {
@@ -125,7 +174,15 @@ void allocate_device_memory(int num_particles, int num_neighbors,
                             float3 *&d_particles, int *&d_knn)
 {
   // TODO: your device memory allocations here
+  cudaMalloc((void**)&d_particles,num_particles*sizeof(float3));
+  cudaMalloc((void**)&d_knn,num_particles*num_neighbors*sizeof(int)); 
+
   // TODO: don't forget to check for errors
+  if(d_particles ==0 || d_knn ==0) 
+  {
+    printf("couldnt allocated device memory\n");
+    exit(1);
+  }
 }
 
 
@@ -140,6 +197,8 @@ void deallocate_host_memory(float3 *h_particles, int *h_knn, int *h_knn_checker)
 void deallocate_device_memory(float3 *d_particles, int *d_knn)
 {
   // TODO: your device memory deallocations here
+  cudaFree(d_particles);
+  cudaFree(d_knn);
   // TODO: don't forget to check for errors
 }
 
@@ -177,7 +236,6 @@ int main(void)
   // create arrays of 8K elements
   int num_particles = 20*1024;
   const int num_neighbors = 5;
-
   // pointers to host arrays
   float3 *h_particles = 0;
   int    *h_knn = 0;
@@ -200,23 +258,32 @@ int main(void)
   }
 
   // copy input to GPU
+
   start_timer(&timer);
   // TODO: your copy of input from host to device here
+  cudaMemcpy(d_particles,h_particles,num_particles*sizeof(float3),cudaMemcpyHostToDevice);
+//  cudaMemcpy(d_knn,h_knn,num_particles*num_neighbors*sizeof(int),cudaMemcpyHostToDevice);
   stop_timer(&timer,"copy to gpu");
 
+
+  const size_t block_size = 512;
+  const size_t num_blocks = num_particles/block_size;
   start_timer(&timer);  
   // TODO: your kernel launch which uses local memory here
+  device_find_knn_local<<<num_blocks,block_size>>>(d_particles, d_knn, num_particles) ;
   check_cuda_error("brute force knn");
   stop_timer(&timer,"brute force knn");
 
   start_timer(&timer);  
   // TODO: your kernel launch which uses __shared__ memory here
+  device_find_knn_shared<<<num_blocks,block_size>>>(d_particles, d_knn, num_particles) ;
   check_cuda_error("shared meme knn");
   stop_timer(&timer,"shared mem knn");
 
   // download and inspect the result on the host
   start_timer(&timer);
   // TODO: your copy of results from device to host here
+  cudaMemcpy(h_knn,d_knn,num_particles*num_neighbors*sizeof(int),cudaMemcpyDeviceToHost);
   check_cuda_error("copy from gpu");
   stop_timer(&timer,"copy back from gpu memory");
 

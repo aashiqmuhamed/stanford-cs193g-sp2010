@@ -44,7 +44,7 @@
 
 // TODO enable this to print debugging information
 //const bool print_debug = true;
-const bool print_debug = false;
+const bool print_debug = true;
 
 event_pair timer;
 
@@ -55,7 +55,7 @@ event_pair timer;
 // Overall there cannot be more than 4B bins, so we can just concatenate the bin
 // indices into a single uint.
 
-unsigned int bin_index(float3 particle, int3 gridding) 
+__host__ __device__ unsigned int bin_index(float3 particle, int3 gridding) 
 {
   unsigned int x_index = (unsigned int)(particle.x * (1 << gridding.x));
   unsigned int y_index = (unsigned int)(particle.y * (1 << gridding.y));
@@ -94,7 +94,7 @@ bool cross_check_results(int * h_bins, int * h_bins_checker, int * h_bin_counter
   int error = 0;
 
   for(int i=0;i<num_bins;i++)
-  {
+  { 
     if(h_bin_counters[i] != h_bin_counters_checker[i])
     {
 
@@ -115,6 +115,8 @@ bool cross_check_results(int * h_bins, int * h_bins_checker, int * h_bin_counter
       {
         if(h_particles_binids_checker[h_bins[i*bin_size+j]] != i)
         {
+          
+//          printf("%d %d \n",h_particles_binids_checker[h_bins[i*bin_size+j]],i);
           error = 1;
         }
       }
@@ -143,7 +145,34 @@ __global__ void initialize(T *array,T value, unsigned int array_length)
   }
 }
 
-void device_binning(float3 * h_particles, int * h_bins, int * h_bin_counters, int3 gridding, int num_particles, int num_bins, int bin_size)
+__global__ void device_binning_kernel(float3 *d_particles,int *d_bins,int * d_bin_counters, int *d_overflow_flag,int3 *temp_gridding, int *temp_bin_size, int *temp_num_particles) 
+{
+
+    int3 gridding = *temp_gridding;
+    int num_particles = *temp_num_particles;
+    int bin_size = *temp_bin_size;
+    int i = blockIdx.x * blockDim.x  + threadIdx.x;
+
+    //printf("%d",i); 
+    if (i <num_particles) 
+{
+    unsigned int bin = bin_index(d_particles[i],gridding);
+    if(d_bin_counters[bin] < bin_size)
+    {
+    //  printf("%d %d \n",d_bin_counters[bin],bin_size);
+    //  unsigned int offset = atomicExch(d_bin_counters[bin]);
+      // let's not do the whole precrement / postcrement thing...
+      unsigned int offset = atomicAdd(&d_bin_counters[bin],1);
+      atomicExch(&d_bins[bin*bin_size + offset],i);
+    }
+    else {
+      atomicExch(d_overflow_flag,true);
+      printf("%d",bin_size);
+      printf("%d",d_bin_counters[bin]);
+    }
+    }
+}
+ void device_binning(float3 * h_particles, int * h_bins, int * h_bin_counters, int3 gridding, int num_particles, int num_bins, int bin_size)
 {
   // TODO: your implementation here
 
@@ -154,6 +183,64 @@ void device_binning(float3 * h_particles, int * h_bins, int * h_bin_counters, in
 	// initialize<<<griddim,blockdim>>>(array, value, array_length);
 	// The compiler will figure out the types of your arguments and codegen a implementation for each type you use.
 
+
+  //Device 
+
+  float3 *d_particles = 0;
+  int *d_bins = 0;
+  int *d_bin_counters = 0;
+  
+  int *d_num_particles = 0;
+  int *d_bin_size = 0;
+  int3 *d_gridding = 0;
+  int* d_overflow_flag =0;
+
+  cudaMalloc((void**)&d_particles,num_particles * sizeof(float3));
+  cudaMalloc((void**)&d_bins,num_bins * bin_size * sizeof(int));
+  cudaMalloc((void**)&d_bin_counters,num_bins * sizeof(int));
+  cudaMalloc((void**)&d_num_particles,sizeof(int));
+  cudaMalloc((void**)&d_bin_size,sizeof(int)) ;
+  cudaMalloc((void**)&d_gridding,sizeof(int3));
+  cudaMalloc((void**)&d_overflow_flag,sizeof(int));
+
+  int blockdim = 512;
+  int griddim = (num_particles)/blockdim; //Majority of threads dont do work during initialization
+
+  cudaMemcpy(d_particles,h_particles,num_particles*sizeof(float3),cudaMemcpyHostToDevice);
+  initialize<<<griddim,blockdim>>>(d_bins, -1, num_bins*bin_size);
+  initialize<<<griddim,blockdim>>>(d_bin_counters, 0, num_bins);
+    
+  cudaMemcpy(d_num_particles,&num_particles,sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_bin_size,&bin_size,sizeof(int),cudaMemcpyHostToDevice);
+  cudaMemcpy(d_gridding,&gridding,sizeof(int3),cudaMemcpyHostToDevice);
+  cudaMemset((void*)d_overflow_flag,0,sizeof(int)); 
+
+  int* overflow_flag_checker = 0;
+  overflow_flag_checker = (int*)malloc(sizeof(int));
+
+  //cudaMemcpy(overflow_flag_checker,d_overflow_flag,sizeof(int),cudaMemcpyDeviceToHost); 
+ //printf("%d",*overflow_flag_checker);
+  device_binning_kernel<<<griddim,blockdim>>>(d_particles, d_bins, d_bin_counters, d_overflow_flag,d_gridding,d_bin_size,d_num_particles);
+
+  cudaMemcpy(h_bins,d_bins,num_bins*bin_size*sizeof(int),cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_bin_counters,d_bin_counters,num_bins*sizeof(int),cudaMemcpyDeviceToHost);
+
+  cudaMemcpy(overflow_flag_checker,d_overflow_flag,sizeof(int),cudaMemcpyDeviceToHost); 
+  //printf("%d",*overflow_flag_checker);
+  if(*overflow_flag_checker)
+  {
+    printf("one of the bins overflowed in device!\n");
+   exit(1);
+  }
+  // check CUDA output versus reference output
+
+  cudaFree(d_particles);
+  cudaFree(d_bins);
+  cudaFree(d_bin_counters);
+  cudaFree(d_gridding);
+  cudaFree(d_num_particles);
+  cudaFree(d_bin_size);
+  cudaFree(d_overflow_flag);
 }
 
 int main(void)
@@ -212,7 +299,6 @@ int main(void)
     h_bins[i] = h_bins_checker[i] = h_particles_binids_checker[i] = -1;
   }
 
-  device_binning(h_particles, h_bins, h_bin_counters, gridding, num_particles, num_bins, bin_size);
   
   // generate reference output
   start_timer(&timer);
@@ -225,6 +311,8 @@ int main(void)
     exit(1);
   }
 
+
+ device_binning(h_particles, h_bins, h_bin_counters, gridding, num_particles, num_bins, bin_size);
   // check CUDA output versus reference output
   cross_check_results(h_bins, h_bins_checker, h_bin_counters, h_bin_counters_checker, h_particles_binids_checker, num_particles, num_bins, bin_size);
 
