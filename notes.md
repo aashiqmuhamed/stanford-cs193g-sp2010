@@ -19,11 +19,11 @@ High level parallelism
 Reduce, split, expand
 Primordial pattern - locking in CUDA processors
 
-# Reduce
+### Reduce
 Contigious vs interleaved access patterns and their dependence on performance
 Complexity : Step O(logN), Operation O(N), Time O(N/P + logN)
 
-# Split, compact, expand
+### Split, compact, expand
 Separate key value pairs by key (Sorting, building trees)
 Removing null elements
 
